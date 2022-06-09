@@ -1,4 +1,4 @@
-import { CACHE_MANAGER, Inject, Injectable } from '@nestjs/common';
+import { CACHE_MANAGER, Inject, Injectable, Logger } from '@nestjs/common';
 import {
   MessageBody,
   WebSocketServer,
@@ -25,43 +25,62 @@ type VoteRedisProps = {
 export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   constructor(@Inject(CACHE_MANAGER) private readonly cacheManager: Cache) {}
 
+  private readonly logger = new Logger('EventsGateway');
+
   @WebSocketServer()
   private server: Server;
 
   getSocketsByRoom(roomId: string): Array<string> {
-    const allSockets = this.server.sockets.adapter.rooms.get(roomId);
-
-    return Array.from(allSockets).map(([socketId]) => socketId);
+    try {
+      const allSockets = this.server.sockets.adapter.rooms.get(roomId) || [];
+      return Array.from(allSockets).map(([socketId]) => socketId);
+    } catch (error) {
+      this.logger.error(error);
+      return [];
+    }
   }
 
   async getVotesByRoom(roomId: string): Promise<Array<VoteRedisProps>> {
-    const votes = await this.cacheManager.get<Array<VoteRedisProps>>(roomId);
-    return votes || [];
+    try {
+      const votes = await this.cacheManager.get<Array<VoteRedisProps>>(roomId);
+      return votes || [];
+    } catch (error) {
+      this.logger.error(error);
+      return [];
+    }
   }
 
-  async getRoomByClientId(clientId: string): Promise<string> {
-    const roomId = await this.cacheManager.get<string>(clientId);
-    return roomId || '';
+  async getRoomByClientId(clientId: string): Promise<string | null> {
+    try {
+      const roomId = await this.cacheManager.get<string>(clientId);
+      return roomId || '';
+    } catch (error) {
+      this.logger.error(error);
+      return null;
+    }
   }
 
   async handleDisconnect(client: Socket): Promise<void> {
-    console.log('Disconnected: ', client?.id);
+    this.logger.log(`Client disconnected: ${client.id}`);
     const roomId = await this.getRoomByClientId(client.id);
 
-    const votes = await this.getVotesByRoom(roomId);
-    const removedClientVote = votes.filter(
-      ({ clientId }) => clientId !== client.id,
-    );
-    await this.cacheManager.set(roomId, removedClientVote);
+    if (roomId) {
+      const votes = await this.getVotesByRoom(roomId);
+      const removedClientVote = votes.filter(
+        ({ clientId }) => clientId !== client.id,
+      );
+      await this.cacheManager.set(roomId, removedClientVote);
 
-    const socketsByRoom = this.getSocketsByRoom(roomId);
-    this.server.to(roomId).emit('users', socketsByRoom);
-    this.server.to(roomId).emit('votes', removedClientVote);
-    await this.cacheManager.del(client.id);
+      this.server.to(roomId).emit('votes', removedClientVote);
+      await this.cacheManager.del(client.id);
+
+      const socketsByRoom = this.getSocketsByRoom(roomId);
+      this.server.to(roomId).emit('users', socketsByRoom);
+    }
   }
 
   handleConnection(client: Socket) {
-    console.log('Connected: ', client?.id);
+    this.logger.log(`Client connected: ${client.id}`);
   }
 
   async registerVote(
@@ -70,7 +89,6 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     clientId: string,
   ): Promise<void> {
     const votes = await this.getVotesByRoom(roomId);
-    console.log({ votes });
 
     const voteIndex = votes.findIndex((vote) => vote.clientId === clientId);
 
@@ -83,8 +101,8 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       });
     }
 
-    await this.cacheManager.set(roomId, votes);
     this.server.to(roomId).emit('votes', votes);
+    await this.cacheManager.set(roomId, votes);
   }
 
   @SubscribeMessage('votes')
@@ -93,7 +111,6 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
   ): Promise<void> {
     const roomId = await this.getRoomByClientId(client.id);
-
     await this.registerVote(value, roomId, client.id);
   }
 
@@ -102,14 +119,16 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() roomId: string,
     @ConnectedSocket() client: Socket,
   ): Promise<void> {
-    client.join(roomId);
-    await this.cacheManager.set(client.id, roomId);
+    if (roomId) {
+      client.join(roomId);
+      await this.cacheManager.set(client.id, roomId);
 
-    console.log('Joining room: ', roomId);
+      this.logger.log(`Client ${client.id} joined room: ${roomId}`);
 
-    const socketsByRoom = this.getSocketsByRoom(roomId);
-    const votesByRoom = await this.getVotesByRoom(roomId);
-    this.server.to(roomId).emit('users', socketsByRoom);
-    this.server.to(roomId).emit('votes', votesByRoom);
+      const socketsByRoom = this.getSocketsByRoom(roomId);
+      const votesByRoom = await this.getVotesByRoom(roomId);
+      this.server.to(roomId).emit('users', socketsByRoom);
+      this.server.to(roomId).emit('votes', votesByRoom);
+    }
   }
 }

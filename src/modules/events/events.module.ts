@@ -12,6 +12,7 @@ import { ConfigModule } from '@nestjs/config';
       port: process.env.REDIS_PORT,
       user: process.env.REDIS_USER,
       password: process.env.REDIS_PASSWORD,
+      ttl: 3600,
     }),
   ],
   providers: [EventsGateway],
