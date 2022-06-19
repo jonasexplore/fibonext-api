@@ -1,4 +1,11 @@
-import { CACHE_MANAGER, Inject, Injectable, Logger } from '@nestjs/common';
+import {
+  CACHE_MANAGER,
+  HttpException,
+  HttpStatus,
+  Inject,
+  Injectable,
+  Logger,
+} from '@nestjs/common';
 import {
   MessageBody,
   WebSocketServer,
@@ -20,7 +27,15 @@ import {
 
 @WebSocketGateway({
   cors: {
-    origin: '*',
+    origin: (origin, callback) => {
+      if ((process.env.ALLOWED_DOMAINS.split(',') || []).includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(
+          new HttpException('Not allowed by CORS', HttpStatus.BAD_GATEWAY),
+        );
+      }
+    },
   },
 })
 @Injectable()
