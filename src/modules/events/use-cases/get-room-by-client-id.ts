@@ -9,7 +9,7 @@ export class GetRoomByClientId {
   async handle(clientId: string): Promise<string | null> {
     try {
       const roomId = await this.cacheManager.get<string>(clientId);
-      return roomId || '';
+      return roomId || null;
     } catch (error) {
       this.logger.error(error);
       return null;
