@@ -2,6 +2,13 @@ import { CacheModule, Module } from '@nestjs/common';
 import { EventsGateway } from './events.gateway';
 import * as redisStore from 'cache-manager-redis-store';
 import { ConfigModule } from '@nestjs/config';
+import {
+  GetRoomByClientId,
+  GetSocketsByRoom,
+  GetVotesByRoom,
+  RegisterVote,
+  ResetVotes,
+} from './use-cases';
 
 @Module({
   imports: [
@@ -15,6 +22,13 @@ import { ConfigModule } from '@nestjs/config';
       ttl: 3600,
     }),
   ],
-  providers: [EventsGateway],
+  providers: [
+    EventsGateway,
+    GetRoomByClientId,
+    GetSocketsByRoom,
+    GetVotesByRoom,
+    RegisterVote,
+    ResetVotes,
+  ],
 })
 export class EventsModule {}
