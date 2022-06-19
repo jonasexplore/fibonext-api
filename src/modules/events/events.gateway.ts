@@ -10,11 +10,13 @@ import {
 } from '@nestjs/websockets';
 import { Cache } from 'cache-manager';
 import { Server, Socket } from 'socket.io';
-
-type VoteRedisProps = {
-  value: number;
-  clientId: string;
-};
+import {
+  GetRoomByClientId,
+  GetSocketsByRoom,
+  GetVotesByRoom,
+  RegisterVote,
+  ResetVotes,
+} from './use-cases';
 
 @WebSocketGateway({
   cors: {
@@ -23,95 +25,57 @@ type VoteRedisProps = {
 })
 @Injectable()
 export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
-  constructor(@Inject(CACHE_MANAGER) private readonly cacheManager: Cache) {}
+  constructor(
+    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+    private readonly getRoomByClientId: GetRoomByClientId,
+    private readonly getSocketsByRoom: GetSocketsByRoom,
+    private readonly getVotesByRoom: GetVotesByRoom,
+    private readonly registerVote: RegisterVote,
+    private readonly resetVotes: ResetVotes,
+  ) {}
 
   private readonly logger = new Logger('EventsGateway');
 
   @WebSocketServer()
   private server: Server;
 
-  getSocketsByRoom(roomId: string): Array<string> {
-    try {
-      const allSockets = this.server.sockets.adapter.rooms.get(roomId) || [];
-      return Array.from(allSockets).map(([socketId]) => socketId);
-    } catch (error) {
-      this.logger.error(error);
-      return [];
-    }
-  }
-
-  async getVotesByRoom(roomId: string): Promise<Array<VoteRedisProps>> {
-    try {
-      const votes = await this.cacheManager.get<Array<VoteRedisProps>>(roomId);
-      return votes || [];
-    } catch (error) {
-      this.logger.error(error);
-      return [];
-    }
-  }
-
-  async getRoomByClientId(clientId: string): Promise<string | null> {
-    try {
-      const roomId = await this.cacheManager.get<string>(clientId);
-      return roomId || '';
-    } catch (error) {
-      this.logger.error(error);
-      return null;
-    }
+  afterInit(server: Server) {
+    this.registerVote.server = server;
+    this.getSocketsByRoom.server = server;
   }
 
   async handleDisconnect(client: Socket): Promise<void> {
     this.logger.log(`Client disconnected: ${client.id}`);
-    const roomId = await this.getRoomByClientId(client.id);
+    const roomId = await this.getRoomByClientId.handle(client.id);
 
-    if (roomId) {
-      const votes = await this.getVotesByRoom(roomId);
-      const removedClientVote = votes.filter(
-        ({ clientId }) => clientId !== client.id,
-      );
-      await this.cacheManager.set(roomId, removedClientVote);
-
-      this.server.to(roomId).emit('votes', removedClientVote);
-      await this.cacheManager.del(client.id);
-
-      const socketsByRoom = this.getSocketsByRoom(roomId);
-      this.server.to(roomId).emit('users', socketsByRoom);
+    if (!roomId) {
+      return;
     }
+
+    const votes = await this.getVotesByRoom.handle(roomId);
+
+    const removedClientVote = votes.filter(
+      ({ clientId }) => clientId !== client.id,
+    );
+    await this.cacheManager.set(roomId, removedClientVote);
+
+    this.server.to(roomId).emit('room:votes', removedClientVote);
+    await this.cacheManager.del(client.id);
+
+    const socketsByRoom = this.getSocketsByRoom.handle(roomId);
+    this.server.to(roomId).emit('room:users', socketsByRoom);
   }
 
   handleConnection(client: Socket) {
     this.logger.log(`Client connected: ${client.id}`);
   }
 
-  async registerVote(
-    value: number,
-    roomId: string,
-    clientId: string,
-  ): Promise<void> {
-    const votes = await this.getVotesByRoom(roomId);
-
-    const voteIndex = votes.findIndex((vote) => vote.clientId === clientId);
-
-    if (voteIndex !== -1) {
-      votes[voteIndex].value = value;
-    } else {
-      votes.push({
-        value,
-        clientId: clientId,
-      });
-    }
-
-    this.server.to(roomId).emit('votes', votes);
-    await this.cacheManager.set(roomId, votes);
-  }
-
-  @SubscribeMessage('votes')
+  @SubscribeMessage('room:votes')
   async votes(
     @MessageBody() value: number,
     @ConnectedSocket() client: Socket,
   ): Promise<void> {
-    const roomId = await this.getRoomByClientId(client.id);
-    await this.registerVote(value, roomId, client.id);
+    await this.registerVote.handle({ value, clientId: client.id });
   }
 
   @SubscribeMessage('join:room')
@@ -125,10 +89,44 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
       this.logger.log(`Client ${client.id} joined room: ${roomId}`);
 
-      const socketsByRoom = this.getSocketsByRoom(roomId);
-      const votesByRoom = await this.getVotesByRoom(roomId);
-      this.server.to(roomId).emit('users', socketsByRoom);
-      this.server.to(roomId).emit('votes', votesByRoom);
+      const socketsByRoom = this.getSocketsByRoom.handle(roomId);
+      const votesByRoom = await this.getVotesByRoom.handle(roomId);
+      const visibility = await this.cacheManager.get(`${roomId}:visibility`);
+
+      this.server.to(roomId).emit('room:users', socketsByRoom);
+      this.server.to(roomId).emit('room:votes', votesByRoom);
+      this.server.to(roomId).emit('room:visibility', visibility);
+    }
+  }
+
+  @SubscribeMessage('room:visibility')
+  async visibility(@ConnectedSocket() client: Socket): Promise<void> {
+    try {
+      const roomId = await this.getRoomByClientId.handle(client.id);
+      const visibility =
+        (await this.cacheManager
+          .get(`${roomId}:visibility`)
+          .catch(() => false)) || false;
+
+      await this.cacheManager.set(`${roomId}:visibility`, !visibility);
+
+      this.server.to(roomId).emit('room:visibility', !visibility);
+    } catch (error) {
+      this.logger.error(error);
+      return null;
+    }
+  }
+
+  @SubscribeMessage('room:reset')
+  async reset(@ConnectedSocket() client: Socket): Promise<void> {
+    try {
+      const roomId = await this.getRoomByClientId.handle(client.id);
+      await this.resetVotes.handle(roomId);
+
+      this.server.to(roomId).emit('room:votes', []);
+    } catch (error) {
+      this.logger.error(error);
+      return null;
     }
   }
 }
